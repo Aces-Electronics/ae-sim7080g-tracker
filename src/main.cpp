@@ -278,11 +278,14 @@ void setup() {
                 StaticJsonDocument<512> doc;
                 doc["mac"] = imei;
                 doc["model"] = "ae-sim7080g-tracker";
+                if (usat < 0) usat = 0; // Sanitize Satellites
+                
                 doc["lat"] = lat;
                 doc["lon"] = lon;
                 doc["alt"] = alt;
                 doc["speed"] = speed;
                 doc["sats"] = usat;
+                doc["hdop"] = acc; // Using Accuracy (acc) as valid proxy for HDOP
                 
                 float batt_volts = PMU.getBattVoltage() / 1000.0F;
                 
