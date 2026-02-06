@@ -211,14 +211,25 @@ void setup() {
     int csq = modem.getSignalQuality();
     Serial.printf("Connecting to Network (CSQ: %d)...\n", csq);
     
-    // Diagnostic: Check registration status
+    // Diagnostic: Check registration status BEFORE attempting connection
+    Serial.println("[DEBUG] Checking network status...");
     modem.sendAT("+CEREG?");
-    modem.waitResponse();
+    String ceregResp = "";
+    if (modem.waitResponse(5000L, ceregResp) == 1) {
+        Serial.println("[DEBUG] CEREG: " + ceregResp);
+    }
     modem.sendAT("+COPS?");
-    modem.waitResponse();
+    String copsResp = "";
+    if (modem.waitResponse(5000L, copsResp) == 1) {
+        Serial.println("[DEBUG] COPS: " + copsResp);
+    }
     modem.sendAT("+CGNAPN"); // Check if network provides an APN
-    modem.waitResponse();
+    String cgnapnResp = "";
+    if (modem.waitResponse(5000L, cgnapnResp) == 1) {
+        Serial.println("[DEBUG] CGNAPN: " + cgnapnResp);
+    }
 
+    Serial.println("[DEBUG] Configuring modem for Telstra...");
     modem.sendAT("+CMNB=1"); // Set to Cat-M only for Telstra preference
     modem.waitResponse();
     modem.sendAT("+COPS=0"); // Force automatic registration
@@ -226,8 +237,13 @@ void setup() {
     modem.setNetworkMode(2); // Automatic mode
     modem.setPreferredMode(3); // CAT-M/NB-IoT
     
+    Serial.println("[DEBUG] Waiting for network registration (3 min timeout)...");
     if (modem.waitForNetwork(180000L)) {
         Serial.println("Network Registered OK");
+        
+        // Re-check signal quality after registration
+        csq = modem.getSignalQuality();
+        Serial.printf("[DEBUG] Signal Quality after registration: %d\n", csq);
         
         bool connected = false;
         Serial.print("Connecting to GPRS (APN: " + settings.apn + ")...");
