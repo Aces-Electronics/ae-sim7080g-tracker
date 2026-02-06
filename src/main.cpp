@@ -107,6 +107,7 @@ void setup() {
     PMU.disableTSPinMeasure();
 
     loadSettings();
+    settings.report_interval_mins = 2; // FORCE 2 mins for initial testing
     
     strip.begin();
     strip.setPixelColor(0, 0, 0, 255); // Blue (BLE Mode)
@@ -178,11 +179,11 @@ void setup() {
     }
 
     // Network & Send
-    Serial.print("Connecting to Network...");
+    Serial.printf("Connecting to Network (CSQ: %d)...", modem.getSignalQuality());
     modem.setNetworkMode(38); // LTE Only
     modem.setPreferredMode(3); // CAT-M/NB-IoT
     
-    if (modem.waitForNetwork(60000L)) {
+    if (modem.waitForNetwork(180000L)) {
         Serial.println(" OK");
         
         bool connected = false;
