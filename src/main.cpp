@@ -159,8 +159,7 @@ void setup() {
     Serial1.begin(115200, SERIAL_8N1, MODEM_RX, MODEM_TX);
     modemPowerOn();
     
-    imei = modem.getIMEI();
-    mqtt_topic_up = "ae-nv/tracker/" + imei + "/up";
+    // Defer imei fetch until after registration to ensure modem is ready
 
     // GPS Acquisition
     Serial.println("Waiting for GPS Fix (5 min max)...");
@@ -257,6 +256,12 @@ void setup() {
         }
 
         if (connected) {
+            if (imei == "") {
+                imei = modem.getIMEI();
+                mqtt_topic_up = "ae-nv/tracker/" + imei + "/up";
+            }
+            Serial.printf("[DEBUG] Using Topic: %s\n", mqtt_topic_up.c_str());
+            
             mqtt.setServer(settings.mqtt_broker.c_str(), 1883);
             if (mqtt.connect(imei.c_str(), settings.mqtt_user.c_str(), settings.mqtt_pass.c_str())) {
                 StaticJsonDocument<512> doc;
