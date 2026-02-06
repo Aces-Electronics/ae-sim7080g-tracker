@@ -107,7 +107,8 @@ void setup() {
     PMU.disableTSPinMeasure();
 
     loadSettings();
-    settings.report_interval_mins = 2; // FORCE 2 mins for initial testing
+    settings.report_interval_mins = 1; // FORCE 60s for rapid testing
+    Serial.println("Forcing 1-minute test interval.");
     
     strip.begin();
     strip.setPixelColor(0, 0, 0, 255); // Blue (BLE Mode)
@@ -179,12 +180,20 @@ void setup() {
     }
 
     // Network & Send
-    Serial.printf("Connecting to Network (CSQ: %d)...", modem.getSignalQuality());
-    modem.setNetworkMode(38); // LTE Only
-    modem.setPreferredMode(3); // CAT-M/NB-IoT
+    int csq = modem.getSignalQuality();
+    Serial.printf("Connecting to Network (CSQ: %d)...\n", csq);
+    
+    // Diagnostic: Check registration status
+    modem.sendAT("+CEREG?");
+    modem.waitResponse();
+    modem.sendAT("+COPS?");
+    modem.waitResponse();
+
+    modem.setNetworkMode(2); // Automatic mode (more permissive)
+    modem.setPreferredMode(3); // CAT-M/NB-IoT (T-SIM7080G-S3 preference)
     
     if (modem.waitForNetwork(180000L)) {
-        Serial.println(" OK");
+        Serial.println("Network Registered OK");
         
         bool connected = false;
         Serial.print("Connecting to GPRS (APN: " + settings.apn + ")...");
