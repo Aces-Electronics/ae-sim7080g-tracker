@@ -146,11 +146,30 @@ void setup() {
     unsigned long gps_start = millis();
     bool got_fix = false;
     float lat=0, lon=0, speed=0, alt=0, acc=0;
-    int vsat=0, usat=0;
+    int usat=0;
 
     while (millis() - gps_start < 300000) { // 5 min timeout
-        if (modem.getGPS(&lat, &lon, &speed, &alt, &vsat, &usat, &acc)) {
+        // Try TinyGsm first for core coordinates
+        if (modem.getGPS(&lat, &lon, &speed, &alt, nullptr, &usat, &acc)) {
             got_fix = true;
+            // Now get raw info for accurate satellite count
+            modem.sendAT("+CGNSINF");
+            if (modem.waitResponse(1000L, "+CGNSINF:") == 1) {
+                String res = modem.stream.readStringUntil('\n');
+                res.trim();
+                // Response: run,fix,date,lat,lon,alt,speed,course,mode,res,hdop,pdop,vdop,res,sats_view,sats_used,...
+                // Sats used is at 15th index (0-based)
+                int commaIndex = -1;
+                for(int i=0; i<15; i++) {
+                    commaIndex = res.indexOf(',', commaIndex + 1);
+                }
+                if (commaIndex != -1) {
+                    int nextComma = res.indexOf(',', commaIndex + 1);
+                    if (nextComma != -1) {
+                        usat = res.substring(commaIndex + 1, nextComma).toInt();
+                    }
+                }
+            }
             Serial.printf("GPS FIX! Sats: %d\n", usat);
             break;
         }
