@@ -25,7 +25,7 @@ BLEHandler ble;
 
 String imei = "";
 String mqtt_topic_up = "";
-bool stay_awake = false;
+bool stay_awake = true; // FORCE TRUE FOR DEFINITIVE DEBUGGING SESSION
 
 void loadSettings() {
     prefs.begin("tracker", false);
@@ -282,12 +282,13 @@ void setup() {
                 if (mqtt.publish(mqtt_topic_up.c_str(), payload.c_str())) {
                     Serial.println("[MQTT] Publish OK");
                 } else {
-                    Serial.println("[MQTT] Publish FAIL");
+                    Serial.printf("[MQTT] Publish FAIL (MQTT State: %d)\n", mqtt.state());
                 }
                 delay(1000);
                 mqtt.disconnect();
             } else {
-                Serial.println("MQTT FAIL");
+                Serial.printf("MQTT FAIL (MQTT State: %d)\n", mqtt.state());
+                Serial.println("Hint: -1=TCP/IP Connect Fail, -2=Timeout, -3=ConnLost, -4=Connect Bad Protocol, -5=Bad ID, -6=Bad User/Pass, -7=Unauthorized, -8=Bad Params");
             }
             modem.gprsDisconnect();
         } else {
