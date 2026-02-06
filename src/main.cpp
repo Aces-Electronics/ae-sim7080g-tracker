@@ -1,3 +1,4 @@
+#define TINY_GSM_DEBUG Serial
 #include <Arduino.h>
 #include "utilities.h"
 #include <TinyGsmClient.h>
@@ -32,7 +33,13 @@ void loadSettings() {
     settings.mqtt_broker = prefs.getString("broker", "mqtt.aceselectronics.com.au");
     settings.mqtt_user = prefs.getString("user", "aesmartshunt");
     settings.mqtt_pass = prefs.getString("pass", "AERemoteAccess2024!");
-    settings.report_interval_mins = prefs.getUInt("interval", 2); // Shorten for testing
+    settings.report_interval_mins = prefs.getUInt("interval", 1); 
+    
+    // Override for Telstra SIM if default is hologram
+    if (settings.apn == "hologram") {
+        settings.apn = "telstra.internet";
+    }
+    
     prefs.end();
     Serial.println("Settings Loaded from NVS.");
 }
@@ -74,7 +81,15 @@ void modemPowerOn() {
         Serial.print(".");
         retry++;
     }
-    Serial.println(modem.testAT() ? "\nModem ON" : "\nModem Power FAIL");
+    if (modem.testAT()) {
+        Serial.println("\nModem ON");
+        modem.sendAT("+CFUN=0"); // Minimum functionality
+        modem.waitResponse(2000L);
+        modem.sendAT("+CFUN=1"); // Full functionality
+        modem.waitResponse(2000L);
+    } else {
+        Serial.println("\nModem Power FAIL");
+    }
 }
 
 void modemPowerOff() {
@@ -105,10 +120,17 @@ void setup() {
         Serial.println("PMU FAIL");
     }
     PMU.disableTSPinMeasure();
+    
+    pinMode(0, INPUT_PULLUP); // Boot Button
+    if (digitalRead(0) == LOW) {
+        stay_awake = true;
+        Serial.println("DEBUG MODE: STAY AWAKE ENABLED");
+        settings.report_interval_mins = 1; // Force 1m even if not in NVS
+    }
 
     loadSettings();
     settings.report_interval_mins = 1; // FORCE 60s for rapid testing
-    Serial.println("Forcing 1-minute test interval.");
+    Serial.println("Forcing 1-minute test interval (ADMIN MODE).");
     
     strip.begin();
     strip.setPixelColor(0, 0, 0, 255); // Blue (BLE Mode)
@@ -116,10 +138,10 @@ void setup() {
 
     // BLE Window
     ble.begin("AE-Tracker-" + String((uint32_t)ESP.getEfuseMac(), HEX), settings);
-    Serial.println("BLE Advertising (60s window)...");
+    Serial.println("BLE Advertising (90s window)...");
     
     unsigned long ble_start = millis();
-    while (millis() - ble_start < 60000 || ble.isConnected()) {
+    while (millis() - ble_start < 90000 || ble.isConnected()) {
         if (ble.isConnected()) {
             strip.setPixelColor(0, 0, 255, 255); // Cyan (Connected)
             strip.show();
@@ -188,9 +210,13 @@ void setup() {
     modem.waitResponse();
     modem.sendAT("+COPS?");
     modem.waitResponse();
+    modem.sendAT("+CGNAPN"); // Check if network provides an APN
+    modem.waitResponse();
 
-    modem.setNetworkMode(2); // Automatic mode (more permissive)
-    modem.setPreferredMode(3); // CAT-M/NB-IoT (T-SIM7080G-S3 preference)
+    modem.sendAT("+CMNB=1"); // Set to Cat-M only for Telstra preference
+    modem.waitResponse();
+    modem.setNetworkMode(2); // Automatic mode
+    modem.setPreferredMode(3); // CAT-M/NB-IoT
     
     if (modem.waitForNetwork(180000L)) {
         Serial.println("Network Registered OK");
@@ -245,8 +271,12 @@ void setup() {
                 
                 String payload;
                 serializeJson(doc, payload);
-                mqtt.publish(mqtt_topic_up.c_str(), payload.c_str());
-                Serial.println("Published: " + payload);
+                Serial.println("[MQTT] Publishing Payload: " + payload);
+                if (mqtt.publish(mqtt_topic_up.c_str(), payload.c_str())) {
+                    Serial.println("[MQTT] Publish OK");
+                } else {
+                    Serial.println("[MQTT] Publish FAIL");
+                }
                 delay(1000);
                 mqtt.disconnect();
             } else {
@@ -260,7 +290,13 @@ void setup() {
         Serial.println("NET FAIL");
     }
 
-    goToSleep();
+    if (stay_awake) {
+        Serial.println("STAY AWAKE: Skipping Deep Sleep. Re-running setup in 10s...");
+        delay(10000);
+        ESP.restart();
+    } else {
+        goToSleep();
+    }
 }
 
 void loop() {
