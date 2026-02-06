@@ -184,7 +184,41 @@ void setup() {
     
     if (modem.waitForNetwork(60000L)) {
         Serial.println(" OK");
+        
+        bool connected = false;
+        Serial.print("Connecting to GPRS (APN: " + settings.apn + ")...");
         if (modem.gprsConnect(settings.apn.c_str())) {
+            connected = true;
+            Serial.println(" OK");
+        } else {
+            Serial.println(" fail");
+            Serial.println("Attempting Auto-APN Discovery (+CGNAPN)...");
+            modem.sendAT("+CGNAPN");
+            if (modem.waitResponse(10000L, "+CGNAPN:") == 1) {
+                String res = modem.stream.readStringUntil('\n');
+                res.trim();
+                int firstQuote = res.indexOf('"');
+                int lastQuote = res.lastIndexOf('"');
+                if (firstQuote != -1 && lastQuote != -1 && lastQuote > firstQuote) {
+                    String discoveredAPN = res.substring(firstQuote + 1, lastQuote);
+                    Serial.println("Discovered APN: " + discoveredAPN);
+                    if (discoveredAPN.length() > 0 && modem.gprsConnect(discoveredAPN.c_str())) {
+                        connected = true;
+                        settings.apn = discoveredAPN;
+                        Serial.println("Connected via Discovered APN!");
+                    }
+                }
+            }
+            if (!connected) {
+                Serial.println("Trying Empty APN...");
+                if (modem.gprsConnect("")) {
+                    connected = true;
+                    Serial.println("Connected with Empty APN!");
+                }
+            }
+        }
+
+        if (connected) {
             mqtt.setServer(settings.mqtt_broker.c_str(), 1883);
             if (mqtt.connect(imei.c_str(), settings.mqtt_user.c_str(), settings.mqtt_pass.c_str())) {
                 StaticJsonDocument<512> doc;
@@ -210,7 +244,7 @@ void setup() {
             }
             modem.gprsDisconnect();
         } else {
-            Serial.println("GPRS FAIL (APN: " + settings.apn + ")");
+            Serial.println("GPRS FAIL");
         }
     } else {
         Serial.println("NET FAIL");
