@@ -25,7 +25,7 @@ BLEHandler ble;
 
 String imei = "";
 String mqtt_topic_up = "";
-bool stay_awake = true; // FORCE TRUE FOR DEFINITIVE DEBUGGING SESSION
+bool stay_awake = false; // Enable Sleep for Backoff Strategy
 
 void loadSettings() {
     prefs.begin("tracker", false);
@@ -58,8 +58,8 @@ void saveSettings() {
 }
 
 void modemPowerOn() {
-    // DC3: Modem Power
-    PMU.setDC3Voltage(3000); 
+    // DC3: Modem Power (Bump to 3.4V for stability)
+    PMU.setDC3Voltage(3400); 
     PMU.enableDC3();
     
     // ALDOs for level shifters
@@ -102,12 +102,41 @@ void modemPowerOff() {
     PMU.disableBLDO2(); // GPS Antenna
 }
 
-void goToSleep() {
+void goToSleep(bool got_fix) {
     modemPowerOff();
-    uint64_t sleep_time = (uint64_t)settings.report_interval_mins * 60 * 1000000ULL;
-    if (sleep_time == 0) sleep_time = 60 * 1000000ULL; // Default 1 min if 0
 
-    Serial.printf("Entering Deep Sleep for %u minutes...\n", settings.report_interval_mins);
+    prefs.begin("tracker", false);
+    int fails = prefs.getUInt("gps_fail", 0);
+    int actual_interval = settings.report_interval_mins;
+
+    if (got_fix) {
+        if (fails > 0) {
+            Serial.printf("[Backoff] Fix obtained! Resetting fail count (was %d)\n", fails);
+            prefs.putUInt("gps_fail", 0);
+        }
+    } else {
+        fails++;
+        prefs.putUInt("gps_fail", fails);
+        Serial.printf("[Backoff] No Fix this session. Consecutive Fails: %d\n", fails);
+        
+        // Backoff Strategy
+        if (fails >= 5) actual_interval = 180;      // 3 hours
+        else if (fails == 4) actual_interval = 60;  // 1 hour
+        else if (fails == 3) actual_interval = 30;  // 30 mins
+        else if (fails == 2) actual_interval = 15;  // 15 mins
+        else if (fails == 1) actual_interval = 5;   // 5 mins
+        
+        if (actual_interval < settings.report_interval_mins) {
+            actual_interval = settings.report_interval_mins;
+        }
+        Serial.printf("[Backoff] Applying Backoff Sleep: %d minutes\n", actual_interval);
+    }
+    prefs.end();
+
+    uint64_t sleep_time = (uint64_t)actual_interval * 60 * 1000000ULL;
+    if (sleep_time == 0) sleep_time = 60 * 1000000ULL;
+
+    Serial.printf("Entering Deep Sleep for %d minutes...\n", actual_interval);
     esp_sleep_enable_timer_wakeup(sleep_time);
     esp_deep_sleep_start();
 }
@@ -145,10 +174,42 @@ void setup() {
     // Power Up Modem & GPS *BEFORE* BLE Window for Live Status
     modemPowerOn();
     Serial.println("Starting GPS/GNSS...");
-    modem.sendAT("+CGNSPWR=1"); // Turn on GNSS
-    if (modem.waitResponse() != 1) {
-        Serial.println("GNSS Power ON FAIL");
+    
+    modem.sendAT("+CMEE=2"); // Verbose errors
+    modem.waitResponse();
+
+    modem.sendAT("+CGNSPWR=1"); 
+    String rawRes = "";
+    unsigned long start = millis();
+    while (millis() - start < 3000) {
+        if (modem.stream.available()) {
+            rawRes += (char)modem.stream.read();
+        }
     }
+    Serial.print("Raw Power ON Response: ");
+    Serial.println(rawRes);
+    
+    // Enable multi-GNSS
+    modem.sendAT("+CGNSSEQ=\"gps;glonass;beidou;galileo\"");
+    modem.waitResponse();
+
+    // Set Active Antenna
+    modem.sendAT("+CGNSAN=1");
+    modem.waitResponse();
+
+    modem.sendAT("+CGNSAD"); // Get antenna info
+    String antRes = "";
+    unsigned long aStart = millis();
+    while (millis() - aStart < 3000) {
+        if (modem.stream.available()) {
+            antRes += (char)modem.stream.read();
+        }
+    }
+    Serial.print("Antenna Status: ");
+    Serial.println(antRes);
+
+    modem.sendAT("+CGNSPWR?");
+    modem.waitResponse(1000L);
     
     // Debug: Check initial Battery
     Serial.printf("[DEBUG] Initial Battery: %.2fV, %d%%, Inserted: %s\n", 
@@ -187,10 +248,12 @@ void setup() {
     
     unsigned long ble_start = millis();
     unsigned long last_poll = 0;
+    unsigned long last_gnss_debug = 0;
     
     // TRACKER STATUS VARIABLES
     float lat=0, lon=0, speed=0, alt=0, acc=0;
     int usat=0;
+    bool session_has_fix = false;
 
     while (millis() - ble_start < 90000 || ble.isConnected()) {
         // Poll BLE for connection parameter updates
@@ -201,6 +264,23 @@ void setup() {
             Serial.println("\n[DEBUG] Stay Awake Triggered by Button Press!");
         }
         
+        // Raw GNSS Diagnostic every 5 seconds
+        if (millis() - last_gnss_debug > 5000) {
+            last_gnss_debug = millis();
+            Serial.print("[GNSS-DEBUG] Raw status: ");
+            modem.sendAT("+CGNSINF");
+            if (modem.waitResponse(1000L, "+CGNSINF: ") == 1) {
+                String res = modem.stream.readStringUntil('\n');
+                res.trim();
+                Serial.println(res);
+                
+                // Parse for quick serial readout
+                // Format: <run_status>,<fix_status>,<timestamp>,<lat>,<lon>,<alt>,<speed>,<course>,<fix_mode>,<reserved>,<HDOP>,<PDOP>,<VDOP>,<reserved>,<gnss_sat_in_view>,<gnss_sat_used>,<glonass_sat_used>,<reserved>,<cn0_max>,<hpa>,<vpa>
+            } else {
+                Serial.println("FAIL");
+            }
+        }
+
         if (ble.isConnected()) {
             strip.setPixelColor(0, 0, 255, 255); // Cyan (Connected)
             strip.show();
@@ -222,6 +302,7 @@ void setup() {
                     status.sats = usat;
                     status.hdop = acc; // Store Accuracy as HDOP
                     status.gps_fix = true;
+                    session_has_fix = true;
                 } else {
                     status.gps_fix = false;
                 }
@@ -367,7 +448,7 @@ void setup() {
         delay(10000);
         ESP.restart();
     } else {
-        goToSleep();
+        goToSleep(session_has_fix);
     }
 }
 
