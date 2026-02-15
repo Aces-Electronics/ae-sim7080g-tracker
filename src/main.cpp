@@ -58,8 +58,9 @@ void saveSettings() {
 }
 
 void modemPowerOn() {
-    // DC3: Modem Power (Bump to 3.4V for stability)
-    PMU.setDC3Voltage(3400); 
+    // DC3: Modem Power (3.0V per LilyGo Examples for T-SIM7080G-S3)
+    // Range is 2700~3400mV. 3000mV is safe default.
+    PMU.setDC3Voltage(3000); 
     PMU.enableDC3();
     
     // ALDOs for level shifters
@@ -386,6 +387,24 @@ void setup() {
             }
             Serial.printf("[DEBUG] Using Topic: %s\n", mqtt_topic_up.c_str());
             
+            // --- CRITICAL FIX: Read GPS before publishing (even if BLE wasn't connected) ---
+            Serial.println("[DEBUG] Reading fresh GPS data for MQTT...");
+            float f_lat=0, f_lon=0, f_speed=0, f_alt=0, f_acc=0;
+            int f_vsat=0, f_usat=0;
+            if (modem.getGPS(&f_lat, &f_lon, &f_speed, &f_alt, &f_vsat, &f_usat, &f_acc)) {
+                Serial.printf("[DEBUG] Fresh GPS: Lat=%.6f Lon=%.6f Sats=%d\n", f_lat, f_lon, f_usat);
+                lat = f_lat;
+                lon = f_lon;
+                speed = f_speed;
+                alt = f_alt;
+                usat = f_usat;
+                acc = f_acc;
+                session_has_fix = true; // Ensure we mark as fixed for backoff logic
+            } else {
+                Serial.println("[DEBUG] GPS Read Failed (using last known or 0).");
+            }
+            // -------------------------------------------------------------------------------
+
             mqtt.setServer(settings.mqtt_broker.c_str(), 1883);
             if (mqtt.connect(imei.c_str(), settings.mqtt_user.c_str(), settings.mqtt_pass.c_str())) {
                 StaticJsonDocument<512> doc;
