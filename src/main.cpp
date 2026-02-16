@@ -41,8 +41,11 @@ void loadSettings() {
         settings.apn = "telstra.internet";
     }
     
-    prefs.end();
     Serial.println("Settings Loaded from NVS.");
+    Serial.printf("[Settings] Broker: %s\n", settings.mqtt_broker.c_str());
+    Serial.printf("[Settings] Name: %s\n", settings.name.c_str());
+    Serial.printf("[Settings] Interval: %d mins\n", settings.report_interval_mins);
+    prefs.end();
 }
 
 void saveSettings() {
@@ -58,40 +61,37 @@ void saveSettings() {
 }
 
 void modemPowerOn() {
-    // DC3: Modem Power (3.0V per LilyGo Examples for T-SIM7080G-S3)
-    // Range is 2700~3400mV. 3000mV is safe default.
-    PMU.setDC3Voltage(3000); 
+    Serial.println("[Modem] Init Power...");
+    PMU.setDC3Voltage(3400); 
     PMU.enableDC3();
-    
-    // ALDOs for level shifters
-    PMU.enableALDO1();
-    PMU.enableALDO2();
-    PMU.enableALDO3();
+    PMU.setALDO4Voltage(3300);
     PMU.enableALDO4();
-
-    // BLDO2: GPS Antenna
-    PMU.setBLDO2Voltage(3300);
-    PMU.enableBLDO2();
-
-    digitalWrite(MODEM_PWRKEY, LOW);
-    delay(100);
-    digitalWrite(MODEM_PWRKEY, HIGH);
-    delay(1000);
-    digitalWrite(MODEM_PWRKEY, LOW);
     
-    int retry = 0;
-    while (!modem.testAT(1000) && retry < 10) {
-        Serial.print(".");
-        retry++;
+    // Drain any old data
+    while(Serial1.available()) Serial1.read();
+
+    if (!modem.testAT(1000)) {
+        Serial.println("[Modem] PWRKEY Pulse...");
+        pinMode(MODEM_PWRKEY, OUTPUT);
+        digitalWrite(MODEM_PWRKEY, LOW);
+        delay(100);
+        digitalWrite(MODEM_PWRKEY, HIGH);
+        delay(1000);
+        digitalWrite(MODEM_PWRKEY, LOW);
+        
+        unsigned long start = millis();
+        while (millis() - start < 20000) {
+            if (modem.testAT(500)) break;
+            delay(500);
+        }
     }
-    if (modem.testAT()) {
-        Serial.println("\nModem ON");
-        modem.sendAT("+CFUN=0"); // Minimum functionality
-        modem.waitResponse(2000L);
-        modem.sendAT("+CFUN=1"); // Full functionality
-        modem.waitResponse(2000L);
+    
+    if (modem.testAT(1000)) {
+        Serial.println("[Modem] Online.");
+        modem.sendAT("+CFUN=1");
+        modem.waitResponse();
     } else {
-        Serial.println("\nModem Power FAIL");
+        Serial.println("[Modem] Power FAIL");
     }
 }
 
@@ -167,11 +167,20 @@ bool parseCGNSINF(String raw, float* lat, float* lon, float* speed, float* alt, 
         }
     }
 
+    // Index 1: Fix Status (Must be '1'), Index 2: Time (Must not be empty)
+    if (parts[1] != "1" || parts[2].length() == 0) return false;
+
     // Index 3: Lat, 4: Lon (Verify they are not empty)
     if (parts[3].length() == 0 || parts[4].length() == 0) return false;
     
-    *lat = parts[3].toFloat();
-    *lon = parts[4].toFloat();
+    float lat_val = parts[3].toFloat();
+    float lon_val = parts[4].toFloat();
+
+    // Safety: Ignore modem default "Australia Center" placeholder (-27.000001, 133.0)
+    if (abs(lat_val + 27.0) < 0.001 && abs(lon_val - 133.0) < 0.001) return false;
+
+    *lat = lat_val;
+    *lon = lon_val;
     *alt = parts[5].toFloat();
     *speed = parts[6].toFloat();
     *hdop = parts[10].toFloat();
@@ -258,6 +267,29 @@ void runBLEWindow(unsigned long duration_ms) {
     strip.show();
 }
 
+String getIMEIWithRetry() {
+    for (int i = 0; i < 3; i++) {
+        // Clear buffer
+        while (Serial1.available()) Serial1.read();
+        
+        String res = modem.getIMEI();
+        if (res.length() >= 14 && res != "OK") {
+            // Validate numeric
+            bool numeric = true;
+            for (char c : res) {
+                if (!isDigit(c)) { numeric = false; break; }
+            }
+            if (numeric) return res;
+        }
+        Serial.printf("[Modem] IMEI Retry %d (Got: %s)\n", i+1, res.c_str());
+        delay(500);
+    }
+    // Fallback to MAC suffix if IMEI fails repeatedly
+    String mac = String((uint32_t)ESP.getEfuseMac(), HEX);
+    mac.toUpperCase();
+    return "ESP32-" + mac;
+}
+
 bool getPreciseLocation(float* lat, float* lon, float* speed, float* alt, int* sats, float* hdop) {
     Serial.println("[Lifecycle] Acquiring GPS Fix...");
     strip.setPixelColor(0, 255, 165, 0); // Orange
@@ -272,40 +304,62 @@ bool getPreciseLocation(float* lat, float* lon, float* speed, float* alt, int* s
     modem.waitResponse();
 
     unsigned long start = millis();
-    // Timeout: 120s max for fix
-    unsigned long timeout = 120000; 
-    
     bool locked = false;
-    float last_pdop = 99.9;
-    unsigned long stable_start = 0;
 
-    while (millis() - start < timeout) {
+    while (millis() - start < 300000L) {
         modem.sendAT("+CGNSINF");
         String res = "";
-        if (modem.waitResponse(1000L, "+CGNSINF: ") == 1) {
-            res = modem.stream.readStringUntil('\n');
-            res.trim();
-            Serial.printf("[GPS-RAW] %s\n", res.c_str());
+        if (modem.waitResponse(2000L, res) != 1) {
+            delay(1000);
+            continue;
         }
-
+        
+        if (res.startsWith("+CGNSINF: ")) res = res.substring(10);
+        
         float f_lat=0, f_lon=0, f_speed=0, f_alt=0, f_acc=0;
         int f_sats=0;
         
         if (parseCGNSINF(res, &f_lat, &f_lon, &f_speed, &f_alt, &f_sats, &f_acc)) {
-            Serial.printf("[GPS] Fix! Sats=%d HDOP=%.2f\n", f_sats, f_acc);
+            Serial.printf("[GPS] Valid! Lat=%.4f Lon=%.4f Sats=%d HDOP=%.2f\n", f_lat, f_lon, f_sats, f_acc);
             
-            // Always update coordinates if we have a somewhat valid fix (HDOP < 10)
-            if (f_acc < 10.0 && f_lat != 0.0) {
-                *lat = f_lat; *lon = f_lon; *speed = f_speed; *alt = f_alt; *sats = f_sats; *hdop = f_acc;
-            }
+            // Always update coordinates if we have a valid fix
+            *lat = f_lat; *lon = f_lon; *speed = f_speed; *alt = f_alt; *sats = f_sats; *hdop = f_acc;
 
-            // Lock Criteria: HDOP < 2.5 and Sats >= 4 OR HDOP < 2.0 (Strong Fix)
-            if (f_acc < 2.0 || (f_acc < 2.5 && f_sats >= 4)) {
+            // Lock Criteria: HDOP < 2.5 and Sats >= 4 OR HDOP < 1.5 (Strong Fix)
+            if (f_acc < 1.5 || (f_acc < 2.5 && f_sats >= 4)) {
                 locked = true;
                 break; 
             }
         } else {
-            Serial.print(".");
+            // Improved Diagnostic Logging
+            if (res.length() > 0) {
+                int firstComma = res.indexOf(',');
+                int secondComma = res.indexOf(',', firstComma + 1);
+                int thirdComma = res.indexOf(',', secondComma + 1);
+                
+                String fixStatus = res.substring(firstComma + 1, secondComma);
+                
+                // Sats View is at index 14
+                int commaCount = 0;
+                int satsViewIdx = -1;
+                for (int i = 0; i < res.length(); i++) {
+                    if (res[i] == ',') {
+                        commaCount++;
+                        if (commaCount == 14) {
+                            int nextComma = res.indexOf(',', i + 1);
+                            if (nextComma != -1) {
+                                String sv = res.substring(i + 1, nextComma);
+                                Serial.printf("[GPS] Wait... FixStatus=%s SatsView=%s\n", fixStatus.c_str(), sv.c_str());
+                                satsViewIdx = i;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if (satsViewIdx == -1) {
+                    Serial.printf("[GPS] Wait... FixStatus=%s\n", fixStatus.c_str());
+                }
+            }
         }
         delay(1000);
     }
@@ -320,9 +374,16 @@ bool getPreciseLocation(float* lat, float* lon, float* speed, float* alt, int* s
 }
 
 void transmitData(float lat, float lon, float speed, float alt, int sats, float hdop) {
+    Serial.println("[Lifecycle] Preparing Transmission...");
+    
+    imei = getIMEIWithRetry();
+    mqtt_topic_up = "ae-nv/tracker/" + imei + "/up";
+    Serial.printf("[MQTT] MAC/IMEI: %s\n", imei.c_str());
+    Serial.printf("[MQTT] Topic: %s\n", mqtt_topic_up.c_str());
+
     Serial.println("[Lifecycle] Connecting to Network...");
     
-    // Ensure Modem RF is ON (if we turned it off previously)
+    // Ensure Modem RF is ON
     modem.sendAT("+CFUN=1");
     modem.waitResponse(2000L);
 
@@ -333,24 +394,22 @@ void transmitData(float lat, float lon, float speed, float alt, int sats, float 
     }
     Serial.println(" OK");
     
+    Serial.printf("[Lifecycle] Connecting to GPRS (APN: %s)...", settings.apn.c_str());
     if (modem.gprsConnect(settings.apn.c_str())) {
-        Serial.println("[Lifecycle] GPRS Connected");
+        Serial.println(" Connected");
         
-        if (imei == "") imei = modem.getIMEI();
-        mqtt_topic_up = "ae-nv/tracker/" + imei + "/up";
-        
+        Serial.printf("[MQTT] Connecting to %s...", settings.mqtt_broker.c_str());
         mqtt.setServer(settings.mqtt_broker.c_str(), 1883);
         if (mqtt.connect(imei.c_str(), settings.mqtt_user.c_str(), settings.mqtt_pass.c_str())) {
+            Serial.println(" Connected");
             
             StaticJsonDocument<512> doc;
             doc["mac"] = imei;
             
             String suffix = settings.name;
             if (suffix.length() == 0) {
-                String mac = String((uint32_t)ESP.getEfuseMac(), HEX);
-                mac.toUpperCase();
-                if (mac.length() > 6) mac = mac.substring(mac.length() - 6);
-                suffix = mac;
+                suffix = imei;
+                if (suffix.length() > 6) suffix = suffix.substring(suffix.length() - 6);
             }
             doc["model"] = "AE Tracker - " + suffix;
             
@@ -362,25 +421,34 @@ void transmitData(float lat, float lon, float speed, float alt, int sats, float 
             doc["hdop"] = hdop;
             
             doc["voltage"] = PMU.getVbusVoltage() / 1000.0F; 
-            doc["device_voltage"] = PMU.getBattVoltage() / 1000.0F; // Legacy field
+            doc["device_voltage"] = PMU.getBattVoltage() / 1000.0F; 
             doc["battery_voltage"] = PMU.getBattVoltage() / 1000.0F; 
             doc["soc"] = PMU.getBatteryPercent();
-            doc["rssi"] = modem.getSignalQuality();
+            
+            // Convert CSQ to dBm
+            int csq = modem.getSignalQuality();
+            int dbm = (csq == 99) ? -113 : (csq * 2) - 113;
+            doc["rssi"] = dbm;
+            
             doc["interval"] = settings.report_interval_mins;
             
             String payload;
             serializeJson(doc, payload);
             Serial.println("[MQTT] Publishing: " + payload);
-            mqtt.publish(mqtt_topic_up.c_str(), payload.c_str());
+            if (mqtt.publish(mqtt_topic_up.c_str(), payload.c_str())) {
+                Serial.println("[MQTT] Publish Successful");
+            } else {
+                Serial.println("[MQTT] Publish FAILED");
+            }
             
-            delay(500);
+            delay(1000);
             mqtt.disconnect();
         } else {
-             Serial.println("[Lifecycle] MQTT Connect Fail");
+             Serial.printf(" FAILED (State: %d)\n", mqtt.state());
         }
         modem.gprsDisconnect();
     } else {
-        Serial.println("[Lifecycle] GPRS Fail");
+        Serial.println(" GPRS FAILED");
     }
 }
 
