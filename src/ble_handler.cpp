@@ -16,7 +16,7 @@ const char* BLEHandler::PASS_CHAR_UUID      = "beb5483e-36e1-4688-b7f5-ea07361b2
 
 // Legacy/Custom UUIDs
 const char* BLEHandler::APN_CHAR_UUID       = "ae000101-1fb5-459e-8fcc-c5c9c331914b";
-const char* BLEHandler::INTERVAL_CHAR_UUID  = "ae000105-1fb5-459e-8fcc-c5c9c331914b";
+const char* BLEHandler::INTERVAL_CHAR_UUID  = "beb5483e-36e1-4688-b7f5-ea07361b2050";
 
 
 class TrackerBLECallbacks : public BLECharacteristicCallbacks {

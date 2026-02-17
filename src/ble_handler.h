@@ -55,7 +55,7 @@ public:
     
     // Custom/Legacy UUIDs (Not in App yet)
     static const char* APN_CHAR_UUID;          // ae000101...
-    static const char* INTERVAL_CHAR_UUID;     // ae000105...
+    static const char* INTERVAL_CHAR_UUID;     // beb5483e-36e1-4688-b7f5-ea07361b2050
 
 private:
     BLEServer* pServer;

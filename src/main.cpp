@@ -34,8 +34,9 @@ void loadSettings() {
     settings.mqtt_broker = prefs.getString("broker", "mqtt.aceselectronics.com.au");
     settings.mqtt_user = prefs.getString("user", "aesmartshunt");
     settings.mqtt_pass = prefs.getString("pass", "AERemoteAccess2024!");
-    settings.report_interval_mins = prefs.getUInt("interval", 1); 
-    
+    settings.report_interval_mins = prefs.getUInt("interval", 5); 
+    if (settings.report_interval_mins < 5) settings.report_interval_mins = 5;
+
     // Override for Telstra SIM if default is hologram
     if (settings.apn == "hologram") {
         settings.apn = "telstra.internet";
@@ -113,6 +114,7 @@ void goToSleep(bool got_fix) {
     prefs.begin("tracker", false);
     int fails = prefs.getUInt("gps_fail", 0);
     int actual_interval = settings.report_interval_mins;
+    if (actual_interval == 0) actual_interval = 5;
 
     if (got_fix) {
         if (fails > 0) {
@@ -124,7 +126,7 @@ void goToSleep(bool got_fix) {
         prefs.putUInt("gps_fail", fails);
         Serial.printf("[Backoff] No Fix this session. Consecutive Fails: %d\n", fails);
         
-        // Backoff Strategy
+        // Backoff Strategy (Exponential-ish if failing)
         if (fails >= 5) actual_interval = 180;      // 3 hours
         else if (fails == 4) actual_interval = 60;  // 1 hour
         else if (fails == 3) actual_interval = 30;  // 30 mins
@@ -529,7 +531,7 @@ void setup() {
     modemPowerOn(); 
     initGNSS(); // Start GPS early
     
-    runBLEWindow(30000); 
+    runBLEWindow(15000); 
     
     float lat=0, lon=0, speed=0, alt=0, hdop=99; 
     int sats=0;
